@@ -1,0 +1,32 @@
+Installing 1 Circonus Broker (proxy) on a linux host.
+	○ System Requirements
+		§ RHEL/CentOS 7 (7.4+), Ubuntu 20.04
+		§ 2 CPU cores
+		§ 4 Gbytes of RAM
+		§ 40 Gbytes of disk storage
+	
+	○ Install the broker
+		§ Install the broker by following the doc
+			□ https://docs.circonus.com/circonus/integrations/brokers/installation/#rhelcentos-7-installation
+		§ Ports to open
+			□ Need to Have keybase.io put into
+			□ out.circonus.net
+			□ TCP 43191 
+		§ Modify environment variables
+			□ sudo nano /opt/noit/prod/etc/noit.local.env.
+				® Add the account api key
+				® Set a name for the broker
+		§ Start the broker and check the status
+			□ sudo systemctl start noitd
+			□ Sudo systemctl status noitd
+		
+		§ Troubleshoot the log here /opt/noit/prod/log/noitd.log
+			□ Tail -f /opt/noit/prod/log/noitd.log
+			
+	○ Install CUA
+		§ Go to the integration for the device type and copy/paste into the cmd line.
+		§ Modify the config file:
+		§ cd /opt/circonus/unified-agent/etc/
+			□ Modify the API Key
+			□ Modify the broker CID "NAME"
+sudo systemctl restart circonus-unified-agent
