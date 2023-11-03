@@ -1,89 +1,100 @@
 import requests
 import openpyxl
 import tldextract
-import time
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
-
+from datetime import datetime, timedelta
+import json
 
 # Constants
-API_KEY = 'dnsdb-api'
+API_KEY = 'dnsdb_api_key'
 BASE_URL = 'https://api.dnsdb.info/dnsdb/v2/regex/rrnames/'
 HEADERS = {
     'X-API-KEY': API_KEY,
     'Accept': 'application/x-ndjson'
 }
-LIMIT = 1000000
+LIMIT = 40000
 SWCLIENT = 'dangling_dns_finder'
 VERSION = '0.1'
-MAX_WORKERS = 10  # Number of concurrent agents
 
-# Days to Unix timestamp conversion
-DAYS = 90  # Replace with the number of days you want
-TIME_LAST_AFTER = int(time.time()) - (DAYS * 24 * 60 * 60)
+# Variables to define the time fence in days
+time_seen_after_days_all_time = 90
+time_seen_before_days_all_time = 0  
+time_seen_after_days_last_3_months = 10  
+time_seen_before_days_last_3_months = 0  
 
-# Function to fetch DNS records
-def fetch_dns_records(term, offset, time_last_after=None, limit=50000):
-    url = f"{BASE_URL}^.*\\.*{term}*\\.[^.]*\\..*$/ANY?limit={limit}&offset={offset}&swclient={SWCLIENT}&version={VERSION}"
-    if time_last_after:
-        url += f"&time_last_after={time_last_after}"
+# Calculate the time_last_after based on the current date and the variables
+current_time = datetime.utcnow()
+time_last_after_all_time = int((current_time - timedelta(days=time_seen_after_days_all_time)).timestamp())
+time_last_after_last_3_months = int((current_time - timedelta(days=time_seen_after_days_last_3_months)).timestamp())
+
+# Function to fetch DNS records with pagination
+def fetch_dns_records(term, time_last_after=None):
+    qualified_records_set = set()
+    disqualified_records_set = set()
+    offset = 0
+    more_records_available = True
+
+    while more_records_available:
+        url = f"{BASE_URL}^.*\\.*{term}.*\\.[^.]*\\..*$/ANY?limit={LIMIT}&offset={offset}&swclient={SWCLIENT}&version={VERSION}"
+        if time_last_after is not None:
+            url += f"&time_last_after={time_last_after}"
+
+        print(f"Executing query: {url}")  # Print the query being executed
+        response = requests.get(url, headers=HEADERS)
+        lines = response.text.strip().split("\n")
+        batch_records = {json.loads(line)["obj"]["rrname"] for line in lines if "obj" in json.loads(line)}  # Use json.loads instead of eval
+
+        # Filter records using tldextract and separate qualified and disqualified
+        for record in batch_records:
+            domain = tldextract.extract(record).domain
+            # Disqualify records that match the term or contain 'wildcard'
+            if domain == term or 'wildcard' in record.lower():
+                disqualified_records_set.add(record)
+            else:
+                qualified_records_set.add(record)
+
+        offset += LIMIT
+        more_records_available = len(batch_records) == LIMIT
     
-    response = requests.get(url, headers=HEADERS)
-    lines = response.text.strip().split("\n")
-    return [eval(line)["obj"]["rrname"] for line in lines if "obj" in eval(line)]
+    return list(qualified_records_set), list(disqualified_records_set)
 
-# Function to manage concurrent fetching
-def concurrent_fetch(term, time_last_after=None):
-    all_records = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_offset = {executor.submit(fetch_dns_records, term, offset, time_last_after): offset for offset in range(0, LIMIT, 5000)}
-        for future in concurrent.futures.as_completed(future_to_offset):
-            all_records.extend(future.result())
-    return all_records
 
-# Variables
-term = 'verizon'  # Replace with your term
+# Term
+term = 'domaintools'
 
-# Function to filter out apex domains
-def filter_apex_domains(records):
-    filtered_records = []
-    for record in records:
-        extracted = tldextract.extract(record)
-        if term not in extracted.domain:
-            filtered_records.append(record)
-    return filtered_records
+# Fetch and filter DNS records
+all_time_records, disqualified_all_time = fetch_dns_records(term, time_last_after=time_last_after_all_time)
+last_3_months_records, disqualified_last_3_months = fetch_dns_records(term, time_last_after=time_last_after_last_3_months)
 
-# Fetch DNS records
-all_time_records = concurrent_fetch(term)
-last_3_months_records = concurrent_fetch(term, TIME_LAST_AFTER)
-
-# Filter out domains
-all_time_records = filter_apex_domains(all_time_records)
-last_3_months_records = filter_apex_domains(last_3_months_records)
+# Deduplicate records before finding dangling records
+all_time_records = list(set(all_time_records))
+last_3_months_records = list(set(last_3_months_records))
+disqualified_records = list(set(disqualified_all_time + disqualified_last_3_months))
 
 # Find dangling records
 dangling_records = set(all_time_records) - set(last_3_months_records)
 
-# Create Excel workbook
+# Create Excel workbook and sheets, add records
 wb = openpyxl.Workbook()
-
-# All Time Records Sheet
 ws1 = wb.active
-ws1.title = "All Time Records"
+ws1.title = f"Records after {time_seen_after_days_all_time} days"
+ws2 = wb.create_sheet(title=f"Last {time_seen_after_days_last_3_months} Days Records")
+ws3 = wb.create_sheet(title="Dangling Records")
+ws4 = wb.create_sheet(title="Disqualified FQDNs") 
+
 for idx, record in enumerate(all_time_records, 1):
     ws1.cell(row=idx, column=1, value=record)
 
-# Last 3 Months Records Sheet
-ws2 = wb.create_sheet(title="Last 3 Months Records")
 for idx, record in enumerate(last_3_months_records, 1):
     ws2.cell(row=idx, column=1, value=record)
 
-# Dangling Records Sheet
-ws3 = wb.create_sheet(title="Dangling Records")
 for idx, record in enumerate(dangling_records, 1):
     ws3.cell(row=idx, column=1, value=record)
+
+for idx, record in enumerate(disqualified_records, 1): 
+    ws4.cell(row=idx, column=1, value=record)
 
 # Save Workbook
 wb.save("dns_records.xlsx")
 
 print("Excel workbook has been created.")
+
